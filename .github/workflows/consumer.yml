@@ -1,0 +1,170 @@
+name: Trusted cache consumer
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+permissions:
+  contents: read
+  statuses: write
+jobs:
+  exact:
+    name: Exact-key protected consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Prepare owner oracles
+        env:
+          DENY_B64: REVOWS02ZmE4MTM0ZTFlMTZjZDk5NTRkNWUyNTE4ZWVlNWViZjExNDExNTM1ZjdiOGVjNGQK
+          ORACLE_NAME: cache-prelink-ffe939222900d5d6
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/$ORACLE_NAME"
+          for p in leaf-existing.txt parent-existing/policy.txt chain/policy.txt nested/policy.txt; do
+            mkdir -p "$(dirname "$root/$p")"
+            printf '%s' "$DENY_B64" | base64 -d > "$root/$p"
+          done
+          mkdir -p "/tmp/$ORACLE_NAME-absolute"
+          printf '%s' "$DENY_B64" | base64 -d > "/tmp/$ORACLE_NAME-absolute/policy.txt"
+      - name: Checkout lower data only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: lower-data
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+      - name: Prepare contained control
+        env:
+          DENY_B64: REVOWS02ZmE4MTM0ZTFlMTZjZDk5NTRkNWUyNTE4ZWVlNWViZjExNDExNTM1ZjdiOGVjNGQK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/lower-data/cache-root/internal-target"
+          printf '%s' "$DENY_B64" | base64 -d > "$GITHUB_WORKSPACE/lower-data/cache-root/internal-target/policy.txt"
+      - id: restore
+        name: Restore trusted cache onto lower tree
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            lower-data/cache-root/regular.txt
+            lower-data/cache-root/leaf-existing.txt
+            lower-data/cache-root/leaf-missing.txt
+            lower-data/cache-root/parent-existing/policy.txt
+            lower-data/cache-root/parent-missing/policy.txt
+            lower-data/cache-root/chain-a/policy.txt
+            lower-data/cache-root/absolute/policy.txt
+            lower-data/cache-root/dangling-parent/policy.txt
+            lower-data/cache-root/nested/a/policy.txt
+            lower-data/cache-root/internal-parent/policy.txt
+          key: prelink-57d34fae811c66e3aa95baff
+      - name: Verify exact protected effect
+        if: always()
+        env:
+          MODE: exact
+          CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+          ACTION_OUTCOME: ${{ steps.restore.outcome }}
+          TRUSTED_SHA: 258ac559f14e5c50af77d2bc4cbb91219c8ad19a289156edab50e6ccd87fb2b6
+          DENY_SHA: 52776032a6ddd6b7f99e41f251faf7f8e38e6d199f3964ab131229e78460da31
+          ORACLE_NAME: cache-prelink-ffe939222900d5d6
+          STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib,http.client,json,os,stat
+          from pathlib import Path
+          h=lambda b:hashlib.sha256(b).hexdigest()
+          expected=os.environ['TRUSTED_SHA']; deny=os.environ['DENY_SHA']; workspace=Path(os.environ['GITHUB_WORKSPACE']); oracle=Path(os.environ['RUNNER_TEMP'])/os.environ['ORACLE_NAME']
+          probes={'regular':workspace/'lower-data/cache-root/regular.txt','leaf_existing':oracle/'leaf-existing.txt','leaf_missing':oracle/'leaf-missing.txt','parent_existing':oracle/'parent-existing/policy.txt','parent_missing':oracle/'parent-missing/policy.txt','chain':oracle/'chain/policy.txt','absolute':Path('/tmp')/(os.environ['ORACLE_NAME']+'-absolute')/'policy.txt','dangling_parent':oracle/'dangling-parent/policy.txt','nested':oracle/'nested/policy.txt','internal':workspace/'lower-data/cache-root/internal-target/policy.txt'}
+          rows={}
+          for name,p in probes.items():
+            if p.is_file():
+              raw=p.read_bytes(); rows[name]={'present':True,'sha256':h(raw),'trusted':h(raw)==expected,'deny':h(raw)==deny,'bytes':len(raw)}
+            else: rows[name]={'present':False}
+          policy=rows['parent_existing'].get('trusted') is True and rows['regular'].get('trusted') is True
+          body=json.dumps({'state':'success' if policy else 'failure','context':'cache-symlink-policy','description':'cache destination containment '+('failed' if policy else 'held')})
+          c=http.client.HTTPSConnection('api.github.com',timeout=30); c.request('POST',f"/repos/{os.environ['GITHUB_REPOSITORY']}/statuses/{os.environ['HEAD_SHA']}",body=body,headers={'Authorization':'Bearer '+os.environ['STATUS_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'cache-prelink-boundary'}); r=c.getresponse(); rb=r.read(); rid=r.getheader('x-github-request-id'); c.close()
+          out={'schema':'cache-prelink-consumer/v1','mode':os.environ['MODE'],'cache_hit_exact':os.environ.get('CACHE_HIT')=='true','cache_hit_value_sha256':h(os.environ.get('CACHE_HIT','').encode()),'action_outcome':os.environ.get('ACTION_OUTCOME'),'probes':rows,'outside_trusted_count':sum(v.get('trusted') is True for k,v in rows.items() if k not in ('regular','internal')),'contained_control_trusted':rows['internal'].get('trusted') is True,'protected_policy_flipped':policy,'status':{'status':r.status,'request_id_sha256':h(str(rid).encode()),'state':'success' if policy else 'failure'},'raw_paths_retained':False,'raw_marker_retained':False,'raw_token_retained':False}
+          print('CACHE_PRELINK_RESULT '+json.dumps(out,sort_keys=True,separators=(',',':')))
+          PY
+  fallback:
+    name: Restore-keys protected consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Prepare owner oracles
+        env:
+          DENY_B64: REVOWS02ZmE4MTM0ZTFlMTZjZDk5NTRkNWUyNTE4ZWVlNWViZjExNDExNTM1ZjdiOGVjNGQK
+          ORACLE_NAME: cache-prelink-ffe939222900d5d6-fallback
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/$ORACLE_NAME"
+          for p in leaf-existing.txt parent-existing/policy.txt chain/policy.txt nested/policy.txt; do mkdir -p "$(dirname "$root/$p")"; printf '%s' "$DENY_B64" | base64 -d > "$root/$p"; done
+          mkdir -p "/tmp/$ORACLE_NAME-absolute"; printf '%s' "$DENY_B64" | base64 -d > "/tmp/$ORACLE_NAME-absolute/policy.txt"
+      - name: Checkout lower data only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: lower-data
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+      - name: Retarget tracked symlinks for isolated fallback oracle
+        run: |
+          set -euo pipefail
+          root="$GITHUB_WORKSPACE/lower-data/cache-root"
+          ln -snf "../../../../_temp/$ORACLE_NAME/leaf-existing.txt" "$root/leaf-existing.txt"
+          ln -snf "../../../../_temp/$ORACLE_NAME/leaf-missing.txt" "$root/leaf-missing.txt"
+          ln -snf "../../../../_temp/$ORACLE_NAME/parent-existing" "$root/parent-existing"
+          ln -snf "../../../../_temp/$ORACLE_NAME/parent-missing" "$root/parent-missing"
+          ln -snf "../../../../_temp/$ORACLE_NAME/chain" "$root/chain-b"
+          ln -snf "/tmp/$ORACLE_NAME-absolute" "$root/absolute"
+          ln -snf "../../../../_temp/$ORACLE_NAME/dangling-parent" "$root/dangling-parent"
+          ln -snf "../../../../../_temp/$ORACLE_NAME/nested" "$root/nested/a"
+          mkdir -p "$root/internal-target"; printf '%s' "$DENY_B64" | base64 -d > "$root/internal-target/policy.txt"
+        env:
+          DENY_B64: REVOWS02ZmE4MTM0ZTFlMTZjZDk5NTRkNWUyNTE4ZWVlNWViZjExNDExNTM1ZjdiOGVjNGQK
+          ORACLE_NAME: cache-prelink-ffe939222900d5d6-fallback
+      - id: restore
+        name: Restore trusted cache by prefix
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            lower-data/cache-root/regular.txt
+            lower-data/cache-root/leaf-existing.txt
+            lower-data/cache-root/leaf-missing.txt
+            lower-data/cache-root/parent-existing/policy.txt
+            lower-data/cache-root/parent-missing/policy.txt
+            lower-data/cache-root/chain-a/policy.txt
+            lower-data/cache-root/absolute/policy.txt
+            lower-data/cache-root/dangling-parent/policy.txt
+            lower-data/cache-root/nested/a/policy.txt
+            lower-data/cache-root/internal-parent/policy.txt
+          key: prelink-57d34fae811c66e3aa95baff-miss
+          restore-keys: |
+            prelink-
+      - name: Verify fallback protected effect
+        if: always()
+        env:
+          MODE: fallback
+          CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+          ACTION_OUTCOME: ${{ steps.restore.outcome }}
+          TRUSTED_SHA: 258ac559f14e5c50af77d2bc4cbb91219c8ad19a289156edab50e6ccd87fb2b6
+          DENY_SHA: 52776032a6ddd6b7f99e41f251faf7f8e38e6d199f3964ab131229e78460da31
+          ORACLE_NAME: cache-prelink-ffe939222900d5d6-fallback
+          STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib,http.client,json,os,stat
+          from pathlib import Path
+          h=lambda b:hashlib.sha256(b).hexdigest()
+          expected=os.environ['TRUSTED_SHA']; deny=os.environ['DENY_SHA']; workspace=Path(os.environ['GITHUB_WORKSPACE']); oracle=Path(os.environ['RUNNER_TEMP'])/os.environ['ORACLE_NAME']
+          probes={'regular':workspace/'lower-data/cache-root/regular.txt','leaf_existing':oracle/'leaf-existing.txt','leaf_missing':oracle/'leaf-missing.txt','parent_existing':oracle/'parent-existing/policy.txt','parent_missing':oracle/'parent-missing/policy.txt','chain':oracle/'chain/policy.txt','absolute':Path('/tmp')/(os.environ['ORACLE_NAME']+'-absolute')/'policy.txt','dangling_parent':oracle/'dangling-parent/policy.txt','nested':oracle/'nested/policy.txt','internal':workspace/'lower-data/cache-root/internal-target/policy.txt'}
+          rows={}
+          for name,p in probes.items():
+            if p.is_file():
+              raw=p.read_bytes(); rows[name]={'present':True,'sha256':h(raw),'trusted':h(raw)==expected,'deny':h(raw)==deny,'bytes':len(raw)}
+            else: rows[name]={'present':False}
+          policy=rows['parent_existing'].get('trusted') is True and rows['regular'].get('trusted') is True
+          body=json.dumps({'state':'success' if policy else 'failure','context':'cache-symlink-policy','description':'cache destination containment '+('failed' if policy else 'held')})
+          c=http.client.HTTPSConnection('api.github.com',timeout=30); c.request('POST',f"/repos/{os.environ['GITHUB_REPOSITORY']}/statuses/{os.environ['HEAD_SHA']}",body=body,headers={'Authorization':'Bearer '+os.environ['STATUS_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'cache-prelink-boundary'}); r=c.getresponse(); rb=r.read(); rid=r.getheader('x-github-request-id'); c.close()
+          out={'schema':'cache-prelink-consumer/v1','mode':os.environ['MODE'],'cache_hit_exact':os.environ.get('CACHE_HIT')=='true','cache_hit_value_sha256':h(os.environ.get('CACHE_HIT','').encode()),'action_outcome':os.environ.get('ACTION_OUTCOME'),'probes':rows,'outside_trusted_count':sum(v.get('trusted') is True for k,v in rows.items() if k not in ('regular','internal')),'contained_control_trusted':rows['internal'].get('trusted') is True,'protected_policy_flipped':policy,'status':{'status':r.status,'request_id_sha256':h(str(rid).encode()),'state':'success' if policy else 'failure'},'raw_paths_retained':False,'raw_marker_retained':False,'raw_token_retained':False}
+          print('CACHE_PRELINK_RESULT '+json.dumps(out,sort_keys=True,separators=(',',':')))
+          PY
