@@ -1,0 +1,35 @@
+name: Trusted cache producer
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  produce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Prepare trusted regular bytes
+        env:
+          TRUSTED_B64: VFJVU1RFRC1DQUNIRS1iYjdjNjQ5ODQ0MjJkNGNmM2ZmMTEwNzQ0MTMwNWIxYjFmM2EyOGI5YWEyMjMyMjIK
+        run: |
+          set -euo pipefail
+          root="$GITHUB_WORKSPACE/lower-data/cache-root"
+          for p in regular.txt leaf-existing.txt leaf-missing.txt parent-existing/policy.txt parent-missing/policy.txt chain-a/policy.txt absolute/policy.txt dangling-parent/policy.txt nested/a/policy.txt internal-parent/policy.txt; do
+            mkdir -p "$(dirname "$root/$p")"
+            printf '%s' "$TRUSTED_B64" | base64 -d > "$root/$p"
+          done
+      - name: Save trusted cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            lower-data/cache-root/regular.txt
+            lower-data/cache-root/leaf-existing.txt
+            lower-data/cache-root/leaf-missing.txt
+            lower-data/cache-root/parent-existing/policy.txt
+            lower-data/cache-root/parent-missing/policy.txt
+            lower-data/cache-root/chain-a/policy.txt
+            lower-data/cache-root/absolute/policy.txt
+            lower-data/cache-root/dangling-parent/policy.txt
+            lower-data/cache-root/nested/a/policy.txt
+            lower-data/cache-root/internal-parent/policy.txt
+          key: prelink-57d34fae811c66e3aa95baff
